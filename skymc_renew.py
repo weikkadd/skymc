@@ -1034,6 +1034,7 @@ def open_server_panel(sb):
     handle_cloudflare(sb)
     wait_challenge_gone(sb, timeout=15)
     time.sleep(2)
+    print(f"   当前面板 URL: {sb.get_current_url()}")
 
     # 免费服过期后可能进入 Activate Your Server，需先选 COAL Free
     ok = ensure_not_on_activate_page(sb)
@@ -1104,20 +1105,28 @@ def read_panel_info(sb):
             hasRestart: hasRestart,
             hasRenew: hasRenew,
             hasExpires: hasExpires,
-            buttons: buttons
+            buttons: buttons,
+            bodyHead: body.slice(0, 600)
         });
     """
-    try:
-        raw = sb.execute_script(script)
-        info = json.loads(raw) if raw else {}
-    except Exception as e:
-        print(f"   读取面板信息失败: {e}")
-        info = {}
-    status = info.get("status") or "unknown"
-    remaining = info.get("remaining")
-    print(f"   面板状态: {status}  剩余时间: {remaining or '未读到'}  "
-          f"Start={info.get('hasStart')} Stop={info.get('hasStop')} "
-          f"Expires={info.get('hasExpires')} Renew={info.get('hasRenew')}")
+    for _retry in range(3):
+        try:
+            raw = sb.execute_script(script)
+            info = json.loads(raw) if raw else {}
+        except Exception as e:
+            print(f"   读取面板信息失败: {e}")
+            info = {}
+        status = info.get("status") or "unknown"
+        remaining = info.get("remaining")
+        print(f"   面板状态: {status}  剩余时间: {remaining or '未读到'}  "
+              f"Start={info.get('hasStart')} Stop={info.get('hasStop')} "
+              f"Expires={info.get('hasExpires')} Renew={info.get('hasRenew')}")
+        if status != "unknown" or info.get("hasStart") or info.get("hasStop") or info.get("hasRenew"):
+            return info
+        if _retry < 2:
+            body_head = (info.get("bodyHead") or "")[:300]
+            print(f"   ⚠️ 面板未渲染完，重试... body 前300字: {body_head}")
+            time.sleep(4)
     return info
 
 
