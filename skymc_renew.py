@@ -1914,6 +1914,12 @@ def main():
                         break
                 if not after_start.get("hasExpires") and not after_start.get("hasRenew"):
                     print("   仍未检测到 Expires/Renew，仍将尝试点击")
+                    print(f"   页面按钮: {after_start.get('buttons', [])}")
+                    try:
+                        body_head = sb.execute_script("return (document.body&&document.body.innerText)?document.body.innerText.slice(0,500):'';")
+                        print(f"   body 前500字: {body_head}")
+                    except Exception:
+                        pass
 
             print("\n📄 开始续期流程（服务器已 Online）...")
             print("   入口：侧边栏 Expires in XXm → 菜单 Renew")
