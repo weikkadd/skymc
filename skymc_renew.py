@@ -316,17 +316,43 @@ def challenge_visible(sb):
         return False
 
 
+def turnstile_visible(sb):
+    try:
+        return sb.execute_script("""
+            var iframes = document.querySelectorAll(
+                'iframe[src*="challenges.cloudflare.com"], iframe[src*="hcaptcha.com"]'
+            );
+            if (iframes.length > 0) return true;
+            if (document.querySelector('.cf-turnstile, .h-captcha')) return true;
+            var inp = document.querySelector('[name="cf-turnstile-response"]');
+            if (inp && !inp.value) return true;
+            var dialogs = document.querySelectorAll(
+                '[role="dialog"], [data-slot="dialog"], [data-slot="dialog-content"], .captcha-dialog'
+            );
+            for (var i = 0; i < dialogs.length; i++) {
+                if (dialogs[i].offsetParent !== null) return true;
+            }
+            return false;
+        """)
+    except Exception:
+        return False
+
+
+def any_challenge_visible(sb):
+    return challenge_visible(sb) or turnstile_visible(sb)
+
+
 def handle_cloudflare(sb, max_retry=3):
-    if not challenge_visible(sb):
+    if not any_challenge_visible(sb):
         return True
-    print("🛡  检测到 Cloudflare 人机验证弹窗，开始处理...")
+    print("🛡  检测到验证（Cloudflare/Turnstile/弹窗），开始处理...")
     for i in range(max_retry):
         print(f"   第 {i + 1} 次尝试...")
         try:
             sb.uc_gui_click_captcha()
             print("   ✅ uc_gui_click_captcha 已调用")
             time.sleep(5)
-            if not challenge_visible(sb):
+            if not any_challenge_visible(sb):
                 print("   ✅ 验证已通过")
                 return True
         except Exception as e:
@@ -340,11 +366,11 @@ def wait_challenge_gone(sb, timeout=20):
     """等验证弹窗消失，避免截图被挡住"""
     end = time.time() + timeout
     while time.time() < end:
-        if not challenge_visible(sb):
+        if not any_challenge_visible(sb):
             return True
         handle_cloudflare(sb, max_retry=1)
         time.sleep(1)
-    return not challenge_visible(sb)
+    return not any_challenge_visible(sb)
 
 
 def safe_screenshot(sb, path):
@@ -404,6 +430,40 @@ def fill_field(sb, selectors, value, field_name, timeout=20):
     return False
 
 
+def submit_form_js(sb):
+    try:
+        return sb.execute_script("""
+            var form = document.querySelector('form');
+            if (!form) return false;
+            if (form.requestSubmit) { form.requestSubmit(); return true; }
+            form.submit(); return true;
+        """)
+    except Exception as e:
+        print(f"   JS 提交表单异常: {e}")
+        return False
+
+
+def dump_login_error(sb):
+    try:
+        error = sb.execute_script("""
+            var els = document.querySelectorAll(
+                '[role="alert"], .error, .text-destructive, .text-red-500, [data-slot="form-message"]'
+            );
+            for (var i = 0; i < els.length; i++) {
+                if (els[i].offsetParent !== null && els[i].innerText.trim()) {
+                    return els[i].innerText.trim();
+                }
+            }
+            return null;
+        """)
+        if error:
+            print(f"   ⚠️ 页面错误提示: {error}")
+            return error
+    except Exception:
+        pass
+    return None
+
+
 def click_login(sb):
     selectors = [
         'button:contains("Login")',
@@ -437,7 +497,10 @@ def click_login(sb):
         return True
     except Exception as e:
         print(f"   点击登录失败: {e}")
-        return False
+    if submit_form_js(sb):
+        print("   已通过 JS 提交表单")
+        return True
+    return False
 
 
 def login(sb, email, password):
@@ -476,20 +539,34 @@ def login(sb, email, password):
         print(f"🔑 点击登录按钮...(第 {attempt + 1} 次)")
         click_login(sb)
         time.sleep(3)
-        if challenge_visible(sb):
+        if any_challenge_visible(sb):
             print("   点击登录后出现验证，正在处理...")
             handle_cloudflare(sb, max_retry=4)
             time.sleep(3)
-        for _ in range(10):
+        for _ in range(15):
             url = (sb.get_current_url() or "").lower()
             if "login" not in url:
                 print(f"✅ 登录成功！当前页面: {sb.get_current_url()}")
                 return True
-            if challenge_visible(sb):
+            if any_challenge_visible(sb):
                 handle_cloudflare(sb, max_retry=2)
             time.sleep(1)
-        print("⚠️ 未跳转成功，准备重试...")
-        time.sleep(2)
+        err = dump_login_error(sb)
+        if err:
+            break
+        if attempt < 4:
+            print("⚠️ 未跳转成功，尝试回车键提交...")
+            try:
+                sb.type(PASSWORD_SELECTORS[0], "\n")
+                time.sleep(3)
+                url2 = (sb.get_current_url() or "").lower()
+                if "login" not in url2:
+                    print(f"✅ 登录成功（回车提交）！当前页面: {sb.get_current_url()}")
+                    return True
+            except Exception:
+                pass
+            print("⚠️ 准备重试...")
+            time.sleep(2)
 
     print(f"❌ 登录失败，当前 URL: {sb.get_current_url()}")
     dump_inputs(sb)
@@ -674,7 +751,7 @@ def click_coal_free(sb):
     start_server_clicked = False
 
     for step in range(30):
-        if challenge_visible(sb):
+        if any_challenge_visible(sb):
             print("   激活过程中出现验证...")
             handle_cloudflare(sb, max_retry=3)
             time.sleep(2)
@@ -1630,7 +1707,7 @@ def click_renew(sb):
                 sb.uc_click(sel)
                 print(f"✅ 直接点击 Renew 成功（{sel}）")
                 time.sleep(3)
-                if challenge_visible(sb):
+                if any_challenge_visible(sb):
                     print("   出现验证，处理中...")
                     handle_cloudflare(sb, max_retry=4)
                     time.sleep(2)
@@ -1667,7 +1744,7 @@ def click_renew(sb):
         print("✅ 已检测到 Renew，准备点击...")
         if click_renew_option(sb):
             time.sleep(3)
-            if challenge_visible(sb):
+            if any_challenge_visible(sb):
                 print("   点击 Renew 后出现验证，正在处理...")
                 handle_cloudflare(sb, max_retry=4)
                 time.sleep(3)
