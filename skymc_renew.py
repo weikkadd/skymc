@@ -26,9 +26,10 @@ PASSWORD = os.environ.get("SKYMC_PASSWORD") or os.environ.get("PASSWORD") or ""
 TG_BOT_TOKEN = os.environ.get("TG_BOT_TOKEN") or ""
 TG_CHAT_ID = os.environ.get("TG_CHAT_ID") or ""
 
-SERVER_URL = os.environ.get("SERVER_URL") or "https://skymc.org/en/server/TuUzR_dWxO2P"
+SERVER_IDS = [s.strip() for s in (os.environ.get("SERVER_IDS") or "zEp6ceZaN9b0,30wf2Vz_Aqpr").split(",") if s.strip()]
 LOGIN_URL = "https://skymc.org/en/login"
-SERVER_ID = "TuUzR_dWxO2P"
+SERVER_URL = ""
+SERVER_ID = ""
 
 NODE_LINK = (os.environ.get("NODE_LINK") or "").strip()
 IS_PROXY = os.environ.get("IS_PROXY", "false").lower() == "true"
@@ -1023,12 +1024,12 @@ def ensure_not_on_activate_page(sb):
     return click_coal_free(sb)
 
 
-def open_server_panel(sb):
-    print("📄 进入服务器面板...")
+def open_server_panel(sb, server_url):
+    print(f"📄 进入服务器面板: {server_url}")
     try:
-        sb.uc_open_with_reconnect(SERVER_URL, reconnect_time=5)
+        sb.uc_open_with_reconnect(server_url, reconnect_time=5)
     except Exception:
-        sb.open(SERVER_URL)
+        sb.open(server_url)
     sb.wait_for_ready_state_complete()
     time.sleep(4)
     handle_cloudflare(sb)
@@ -1054,6 +1055,7 @@ def read_panel_info(sb):
         if (/\bOnline\b/i.test(body) || /在线/.test(body)) status = 'Online';
         else if (/\bStarting\b/i.test(body) || /启动中/.test(body)) status = 'Starting';
         else if (/\bStopping\b/i.test(body) || /关闭中/.test(body)) status = 'Stopping';
+        else if (/\bArchived\b/i.test(body) || /已归档/.test(body)) status = 'Archived';
         else if (/\bOffline\b/i.test(body) || /\bStopped\b/i.test(body) || /离线/.test(body) || /已停止/.test(body)) status = 'Offline';
 
         var remaining = null;
@@ -1075,7 +1077,7 @@ def read_panel_info(sb):
             if (matches.length) remaining = matches[0];
         }
 
-        var hasStart = false, hasStop = false, hasRestart = false, hasRenew = false, hasExpires = false;
+        var hasStart = false, hasStop = false, hasRestart = false, hasRenew = false, hasExpires = false, hasUnarchive = false;
         var buttons = [];
         var all = document.querySelectorAll('button, a, [role="button"], div, span');
         for (var i = 0; i < all.length; i++) {
@@ -1096,6 +1098,7 @@ def read_panel_info(sb):
             if (blob.indexOf('restart') >= 0 || blob.indexOf('重启') >= 0) hasRestart = true;
             if (blob.indexOf('renew') >= 0 || blob.indexOf('续期') >= 0) hasRenew = true;
             if (blob.indexOf('expires in') >= 0 || blob.indexOf('expire') >= 0) hasExpires = true;
+            if (blob.indexOf('unarchive') >= 0 || blob.indexOf('取消归档') >= 0 || blob.indexOf('restore') >= 0) hasUnarchive = true;
         }
         return JSON.stringify({
             status: status,
@@ -1105,6 +1108,7 @@ def read_panel_info(sb):
             hasRestart: hasRestart,
             hasRenew: hasRenew,
             hasExpires: hasExpires,
+            hasUnarchive: hasUnarchive,
             buttons: buttons,
             bodyHead: body.slice(0, 600)
         });
@@ -1261,6 +1265,36 @@ def ensure_server_running(sb, info):
     has_start = info.get("hasStart")
     has_stop = info.get("hasStop")
     has_restart = info.get("hasRestart")
+
+    if status == "archived":
+        print("📦 服务器已归档，尝试取消归档...")
+        if info.get("hasUnarchive"):
+            clicked = click_named_button(sb, ["Unarchive", "取消归档", "Restore"])
+            if not clicked:
+                try:
+                    sb.execute_script("""
+                        var btns = document.querySelectorAll('button, a, [role="button"]');
+                        for (var i = 0; i < btns.length; i++) {
+                            var t = (btns[i].innerText || '').toLowerCase();
+                            if (t.indexOf('unarchive') >= 0 || t.indexOf('restore') >= 0) {
+                                btns[i].click(); return true;
+                            }
+                        }
+                        return false;
+                    """)
+                    clicked = True
+                except Exception:
+                    pass
+            if clicked:
+                print("   已点击取消归档，等待服务器恢复...")
+                time.sleep(5)
+                handle_cloudflare(sb)
+                info = read_panel_info(sb)
+                status = (info.get("status") or "").lower()
+            else:
+                print("⚠️ 未找到取消归档按钮")
+        else:
+            print("⚠️ 服务器已归档但未检测到取消归档按钮")
 
     # 已 Online：直接成功（不要用 hasStop 误判，Starting 时也可能有 Stop）
     if status == "online":
@@ -1776,12 +1810,13 @@ def click_renew(sb):
 
 
 def main():
+    global SERVER_URL, SERVER_ID
     if not EMAIL or not PASSWORD:
         print("❌ 请设置环境变量 SKYMC_EMAIL 和 SKYMC_PASSWORD")
         sys.exit(1)
 
     print("🚀 启动 SkyMC 自动续期脚本 v12.7")
-    print(f"目标服务器: {SERVER_URL}")
+    print(f"目标服务器: {', '.join(SERVER_IDS)}")
 
     start_singbox_from_node_link()
 
@@ -1800,85 +1835,90 @@ def main():
             send_tg(TG_BOT_TOKEN, TG_CHAT_ID, msg, image_path="login_failed.png")
             return
 
-        open_server_panel(sb)
-        before = read_panel_info(sb)
-        before_time = before.get("remaining")
-        print(f"⏱ 续期前剩余时间: {format_remaining(before_time)}")
+        for sid in SERVER_IDS:
+            SERVER_ID = sid
+            SERVER_URL = f"https://skymc.org/en/server/{sid}"
+            print(f"\n{'='*50}")
+            print(f"🔄 处理服务器: {sid}")
+            print(f"{'='*50}")
 
-        started_ok, start_msg = ensure_server_running(sb, before)
-        after_start = read_panel_info(sb)
+            open_server_panel(sb, SERVER_URL)
+            before = read_panel_info(sb)
+            before_time = before.get("remaining")
+            print(f"⏱ 续期前剩余时间: {format_remaining(before_time)}")
 
-        if not started_ok:
-            print("⚠️ 服务器未进入 Online，跳过续期，避免找不到 Renew")
-            safe_screenshot(sb, "final_result.png")
-            msg = (
-                f"❌ 续期跳过：服务器未 Online\n"
-                f"服务器: {SERVER_ID}\n"
-                f"当前状态: {(after_start.get('status') or 'unknown')}\n"
-                f"启动操作: {start_msg}\n"
-                f"续期前时间: {format_remaining(before_time)}\n"
-                f"IP: {current_ip}"
-            )
-            print(msg)
-            send_tg(TG_BOT_TOKEN, TG_CHAT_ID, msg, image_path="final_result.png")
-            print("🏁 脚本执行完毕")
-            return
+            started_ok, start_msg = ensure_server_running(sb, before)
+            after_start = read_panel_info(sb)
 
-        # Online 后确认侧边栏 Expires 入口（新 UI 的续期入口）
-        if not after_start.get("hasExpires") and not after_start.get("hasRenew"):
-            print("⏳ Online 但尚未看到 Expires/Renew 入口，再等待最多 60 秒...")
-            end_wait = time.time() + 60
-            while time.time() < end_wait:
-                time.sleep(5)
-                after_start = read_panel_info(sb)
-                if after_start.get("hasExpires") or after_start.get("hasRenew"):
-                    break
+            if not started_ok:
+                print("⚠️ 服务器未进入 Online，跳过续期，避免找不到 Renew")
+                safe_screenshot(sb, "final_result.png")
+                msg = (
+                    f"❌ 续期跳过：服务器未 Online\n"
+                    f"服务器: {SERVER_ID}\n"
+                    f"当前状态: {(after_start.get('status') or 'unknown')}\n"
+                    f"启动操作: {start_msg}\n"
+                    f"续期前时间: {format_remaining(before_time)}\n"
+                    f"IP: {current_ip}"
+                )
+                print(msg)
+                send_tg(TG_BOT_TOKEN, TG_CHAT_ID, msg, image_path="final_result.png")
+                continue
+
             if not after_start.get("hasExpires") and not after_start.get("hasRenew"):
-                print("   仍未检测到 Expires/Renew，仍将尝试点击")
+                print("⏳ Online 但尚未看到 Expires/Renew 入口，再等待最多 60 秒...")
+                end_wait = time.time() + 60
+                while time.time() < end_wait:
+                    time.sleep(5)
+                    after_start = read_panel_info(sb)
+                    if after_start.get("hasExpires") or after_start.get("hasRenew"):
+                        break
+                if not after_start.get("hasExpires") and not after_start.get("hasRenew"):
+                    print("   仍未检测到 Expires/Renew，仍将尝试点击")
 
-        print("\n📄 开始续期流程（服务器已 Online）...")
-        print("   入口：侧边栏 Expires in XXm → 菜单 Renew")
-        renew_ok = click_renew(sb)
+            print("\n📄 开始续期流程（服务器已 Online）...")
+            print("   入口：侧边栏 Expires in XXm → 菜单 Renew")
+            renew_ok = click_renew(sb)
 
-        print("⏳ 等待续期结果刷新...")
-        time.sleep(5)
-        handle_cloudflare(sb)
-        wait_challenge_gone(sb, timeout=15)
-        after = read_panel_info(sb)
-        after_time = after.get("remaining")
-        print(f"⏱ 续期后剩余时间: {format_remaining(after_time)}")
+            print("⏳ 等待续期结果刷新...")
+            time.sleep(5)
+            handle_cloudflare(sb)
+            wait_challenge_gone(sb, timeout=15)
+            after = read_panel_info(sb)
+            after_time = after.get("remaining")
+            print(f"⏱ 续期后剩余时间: {format_remaining(after_time)}")
 
-        safe_screenshot(sb, "final_result.png")
+            safe_screenshot(sb, "final_result.png")
 
-        before_sec = remaining_to_seconds(before_time)
-        after_sec = remaining_to_seconds(after_time)
-        time_note = "无法对比（有一侧未读到时间）"
-        if before_sec is not None and after_sec is not None:
-            delta = after_sec - before_sec
-            if delta > 30:
-                time_note = f"倒计时已增加约 {delta} 秒，续期生效"
-            elif delta >= -5:
-                time_note = "倒计时变化很小，可能刚续过或尚未刷新"
-            else:
-                time_note = "倒计时未增加，请人工核对截图"
+            before_sec = remaining_to_seconds(before_time)
+            after_sec = remaining_to_seconds(after_time)
+            time_note = "无法对比（有一侧未读到时间）"
+            if before_sec is not None and after_sec is not None:
+                delta = after_sec - before_sec
+                if delta > 30:
+                    time_note = f"倒计时已增加约 {delta} 秒，续期生效"
+                elif delta >= -5:
+                    time_note = "倒计时变化很小，可能刚续过或尚未刷新"
+                else:
+                    time_note = "倒计时未增加，请人工核对截图"
 
-        status_now = after.get("status") or after_start.get("status") or "unknown"
-        lines = [
-            f"{'✅' if renew_ok else '❌'} 续期{'已执行' if renew_ok else '失败'}",
-            f"服务器: {SERVER_ID}",
-            f"当前状态: {status_now}",
-            f"启动操作: {start_msg}",
-            f"续期前时间: {format_remaining(before_time)}",
-            f"续期后时间: {format_remaining(after_time)}",
-            f"结论: {time_note}",
-            f"IP: {current_ip}",
-        ]
-        msg = "\n".join(lines)
-        print("\n" + msg)
-        img = "final_result.png" if os.path.exists("final_result.png") else None
-        if not renew_ok and os.path.exists("renew_not_found.png"):
-            img = "renew_not_found.png"
-        send_tg(TG_BOT_TOKEN, TG_CHAT_ID, msg, image_path=img)
+            status_now = after.get("status") or after_start.get("status") or "unknown"
+            lines = [
+                f"{'✅' if renew_ok else '❌'} 续期{'已执行' if renew_ok else '失败'}",
+                f"服务器: {SERVER_ID}",
+                f"当前状态: {status_now}",
+                f"启动操作: {start_msg}",
+                f"续期前时间: {format_remaining(before_time)}",
+                f"续期后时间: {format_remaining(after_time)}",
+                f"结论: {time_note}",
+                f"IP: {current_ip}",
+            ]
+            msg = "\n".join(lines)
+            print("\n" + msg)
+            img = "final_result.png" if os.path.exists("final_result.png") else None
+            if not renew_ok and os.path.exists("renew_not_found.png"):
+                img = "renew_not_found.png"
+            send_tg(TG_BOT_TOKEN, TG_CHAT_ID, msg, image_path=img)
 
     print("🏁 脚本执行完毕")
 
