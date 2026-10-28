@@ -1037,28 +1037,95 @@ def open_server_panel(sb, server_url):
     wait_challenge_gone(sb, timeout=15)
     time.sleep(2)
 
+    # 调试：打印列表页所有含 server 的链接
+    try:
+        links_info = sb.execute_script("""
+            var out = [];
+            var links = document.querySelectorAll('a[href]');
+            for (var i = 0; i < links.length; i++) {
+                var href = links[i].getAttribute('href') || '';
+                if (href.indexOf('server') >= 0) {
+                    var t = (links[i].innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 60);
+                    out.push({href: href, text: t, visible: links[i].offsetParent !== null});
+                }
+            }
+            return JSON.stringify(out);
+        """)
+        print(f"   列表页 server 链接: {links_info}")
+    except Exception:
+        pass
+
     clicked = False
+    # 策略1：精确匹配 a[href] 包含 /server/<id> 或 /servers/<id>
     try:
         clicked = sb.execute_script("""
             var id = arguments[0];
-            var cards = document.querySelectorAll('a[href], button, [role="button"], div');
-            for (var i = 0; i < cards.length; i++) {
-                var c = cards[i];
-                var href = c.getAttribute('href') || '';
-                var text = (c.innerText || '').replace(/\\s+/g, ' ').trim();
+            var links = document.querySelectorAll('a[href]');
+            for (var i = 0; i < links.length; i++) {
+                var href = links[i].getAttribute('href') || '';
                 if (href.indexOf('/server/' + id) >= 0 || href.indexOf('/servers/' + id) >= 0) {
-                    c.click(); return true;
-                }
-                if (text.indexOf(id) >= 0 && c.offsetParent !== null) {
-                    var link = c.closest('a') || c.querySelector('a');
-                    if (link) { link.click(); return true; }
-                    c.click(); return true;
+                    links[i].scrollIntoView({block:'center'});
+                    links[i].click(); return true;
                 }
             }
             return false;
         """, sid)
     except Exception as e:
-        print(f"   点击服务器卡片异常: {e}")
+        print(f"   策略1（a[href]精确匹配）异常: {e}")
+    if clicked:
+        print(f"   ✅ 策略1命中：a[href] 精确匹配 {sid}")
+
+    # 策略2：data-* 属性或 onclick 包含 ID
+    if not clicked:
+        try:
+            clicked = sb.execute_script("""
+                var id = arguments[0];
+                var els = document.querySelectorAll('[onclick], [role="button"], button');
+                for (var i = 0; i < els.length; i++) {
+                    var el = els[i];
+                    var html = el.outerHTML.slice(0, 500);
+                    if (html.indexOf(id) >= 0 && el.offsetParent !== null) {
+                        el.click(); return true;
+                    }
+                }
+                return false;
+            """, sid)
+        except Exception as e:
+            print(f"   策略2（data/onclick匹配）异常: {e}")
+        if clicked:
+            print(f"   ✅ 策略2命中：onclick/data 属性包含 {sid}")
+
+    # 策略3：包含 ID 文本的可见卡片，点击卡片本身
+    if not clicked:
+        try:
+            clicked = sb.execute_script("""
+                var id = arguments[0];
+                var cards = document.querySelectorAll('div, section, article, li');
+                var best = null;
+                for (var i = 0; i < cards.length; i++) {
+                    var c = cards[i];
+                    var text = (c.innerText || '').replace(/\\s+/g, ' ').trim();
+                    if (text.indexOf(id) >= 0 && text.length < 300 && c.offsetParent !== null) {
+                        var r = c.getBoundingClientRect();
+                        if (r.width > 100 && r.height > 50) {
+                            if (!best || text.length < best.text.length) {
+                                best = {el: c, text: text};
+                            }
+                        }
+                    }
+                }
+                if (best) {
+                    var link = best.el.querySelector('a[href*="/server/"]') || best.el.querySelector('a[href*="/servers/"]');
+                    if (link) { link.click(); return true; }
+                    best.el.click(); return true;
+                }
+                return false;
+            """, sid)
+        except Exception as e:
+            print(f"   策略3（卡片文本匹配）异常: {e}")
+        if clicked:
+            print(f"   ✅ 策略3命中：卡片文本包含 {sid}")
+
     if clicked:
         print(f"   已点击服务器卡片 {sid}")
         time.sleep(4)
@@ -1066,18 +1133,47 @@ def open_server_panel(sb, server_url):
         wait_challenge_gone(sb, timeout=15)
         time.sleep(2)
     else:
-        print(f"   未在列表页找到卡片，尝试直接打开 URL...")
-        try:
-            sb.uc_open_with_reconnect(server_url, reconnect_time=5)
-        except Exception:
-            sb.open(server_url)
-        sb.wait_for_ready_state_complete()
-        time.sleep(4)
-        handle_cloudflare(sb)
-        wait_challenge_gone(sb, timeout=15)
+        print(f"   ❌ 列表页未找到卡片，尝试直接打开 URL...")
+
+    # URL 验证：如果点击后 URL 不含 server ID，尝试直接导航
+    current_url = sb.get_current_url()
+    print(f"   当前面板 URL: {current_url}")
+
+    if sid not in current_url and '/server' not in current_url:
+        print(f"   ⚠️ URL 未包含服务器 ID，尝试直接导航...")
+        nav_urls = [
+            server_url,
+            f"https://skymc.org/en/servers/{sid}",
+            f"https://skymc.org/server/{sid}",
+        ]
+        for nav_url in nav_urls:
+            print(f"   尝试导航: {nav_url}")
+            try:
+                sb.uc_open_with_reconnect(nav_url, reconnect_time=5)
+            except Exception:
+                try:
+                    sb.open(nav_url)
+                except Exception:
+                    pass
+            sb.wait_for_ready_state_complete()
+            time.sleep(3)
+            handle_cloudflare(sb)
+            wait_challenge_gone(sb, timeout=10)
+            current_url = sb.get_current_url()
+            print(f"   导航后 URL: {current_url}")
+            if sid in current_url or '/server' in current_url:
+                print(f"   ✅ 导航成功")
+                break
+            # 检查页面是否有 500 错误
+            try:
+                body_head = sb.execute_script("return (document.body&&document.body.innerText)?document.body.innerText.slice(0,200):'';")
+                if '500' in body_head or 'Internal Server Error' in body_head:
+                    print(f"   页面返回 500 错误，尝试下一个 URL")
+                    continue
+            except Exception:
+                pass
         time.sleep(2)
 
-    print(f"   当前面板 URL: {sb.get_current_url()}")
     ok = ensure_not_on_activate_page(sb)
     if not ok:
         print("⚠️ COAL 激活失败，后续可能无法续期")
@@ -1131,12 +1227,15 @@ def read_panel_info(sb):
             if (b.tagName === 'BUTTON' || b.getAttribute('role') === 'button') {
                 buttons.push({text: text, disabled: !!b.disabled, visible: visible});
             }
+            if (b.tagName === 'A' && (b.getAttribute('href') || '').length > 1) {
+                buttons.push({text: text, href: b.getAttribute('href'), visible: visible});
+            }
             if (b.disabled) continue;
             if (blob.indexOf('start') >= 0 || blob.indexOf('启动') >= 0 || html.indexOf('fa-play') >= 0) hasStart = true;
             if (blob.indexOf('stop') >= 0 || blob.indexOf('停止') >= 0 || blob.indexOf('关机') >= 0) hasStop = true;
             if (blob.indexOf('restart') >= 0 || blob.indexOf('重启') >= 0) hasRestart = true;
-            if (blob.indexOf('renew') >= 0 || blob.indexOf('续期') >= 0) hasRenew = true;
-            if (blob.indexOf('expires in') >= 0 || blob.indexOf('expire') >= 0) hasExpires = true;
+            if (blob.indexOf('renew') >= 0 || blob.indexOf('续期') >= 0 || blob.indexOf('续费') >= 0 || blob.indexOf('extend') >= 0) hasRenew = true;
+            if (blob.indexOf('expires in') >= 0 || blob.indexOf('expire') >= 0 || blob.indexOf('到期') >= 0) hasExpires = true;
             if (blob.indexOf('unarchive') >= 0 || blob.indexOf('取消归档') >= 0 || blob.indexOf('restore') >= 0) hasUnarchive = true;
         }
         return JSON.stringify({
@@ -1914,10 +2013,25 @@ def main():
                         break
                 if not after_start.get("hasExpires") and not after_start.get("hasRenew"):
                     print("   仍未检测到 Expires/Renew，仍将尝试点击")
-                    print(f"   页面按钮: {after_start.get('buttons', [])}")
+                    print(f"   当前 URL: {sb.get_current_url()}")
+                    print(f"   页面按钮/链接: {json.dumps(after_start.get('buttons', []), ensure_ascii=False)}")
                     try:
-                        body_head = sb.execute_script("return (document.body&&document.body.innerText)?document.body.innerText.slice(0,500):'';")
-                        print(f"   body 前500字: {body_head}")
+                        body_head = sb.execute_script("return (document.body&&document.body.innerText)?document.body.innerText.slice(0,1000):'';")
+                        print(f"   body 前1000字: {body_head}")
+                    except Exception:
+                        pass
+                    try:
+                        all_links = sb.execute_script("""
+                            var out = [];
+                            var links = document.querySelectorAll('a[href]');
+                            for (var i = 0; i < links.length; i++) {
+                                if (links[i].offsetParent !== null) {
+                                    out.push({href: links[i].getAttribute('href'), text: (links[i].innerText||'').trim().slice(0,40)});
+                                }
+                            }
+                            return JSON.stringify(out);
+                        """)
+                        print(f"   页面所有可见链接: {all_links}")
                     except Exception:
                         pass
 
