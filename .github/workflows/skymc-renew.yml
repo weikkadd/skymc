@@ -2,8 +2,8 @@ name: SkyMC 自动续期 (SeleniumBase UC)
 
 on:
   schedule:
-    # 每30分跑一次
-    - cron: '*/30 * * * *'
+    # 每1小时跑一次（免超 GitHub Actions 免费额度 2000 分钟/月）
+    - cron: '0 * * * *'
   workflow_dispatch:
 
 jobs:

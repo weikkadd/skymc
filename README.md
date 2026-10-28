@@ -43,7 +43,7 @@ skymc-renew-v12/
 ├── skymc_renew.py                 # 主脚本（登录 / 验证 / 续期 / 启动 / 代理）
 ├── skymc_remind.py                # 纯提醒脚本（不登录）
 └── .github/workflows/
-    ├── skymc-renew.yml            # 每 8 小时自动续期
+    ├── skymc-renew.yml            # 每 1 小时自动续期
     └── skymc-remind.yml           # 每 6 小时提醒
 ```
 
@@ -181,7 +181,7 @@ IP: x.x.x.x
 
 | 工作流 | Cron（UTC） | 大约频率 |
 |--------|-------------|----------|
-| `skymc-renew.yml` | `0 */8 * * *` | 每 8 小时续期 |
+| `skymc-renew.yml` | `0 * * * *` | 每 1 小时续期 |
 | `skymc-remind.yml` | `0 */6 * * *` | 每 6 小时提醒 |
 
 建议两个都开：自动续期为主，提醒保底。
@@ -189,7 +189,7 @@ IP: x.x.x.x
 修改频率示例：
 
 ```yaml
-- cron: '0 */8 * * *'      # 每 8 小时
+- cron: '0 * * * *'        # 每 1 小时
 - cron: '0 */4 * * *'      # 每 4 小时
 - cron: '0 0,8,16 * * *'   # 每天 0/8/16 UTC
 ```
