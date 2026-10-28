@@ -1025,23 +1025,62 @@ def ensure_not_on_activate_page(sb):
 
 
 def open_server_panel(sb, server_url):
-    print(f"📄 进入服务器面板: {server_url}")
+    sid = server_url.rstrip("/").split("/")[-1]
+    print(f"📄 进入服务器面板: {sid}")
     try:
-        sb.uc_open_with_reconnect(server_url, reconnect_time=5)
+        sb.uc_open_with_reconnect("https://skymc.org/en/servers", reconnect_time=5)
     except Exception:
-        sb.open(server_url)
+        sb.open("https://skymc.org/en/servers")
     sb.wait_for_ready_state_complete()
-    time.sleep(4)
+    time.sleep(3)
     handle_cloudflare(sb)
     wait_challenge_gone(sb, timeout=15)
     time.sleep(2)
-    print(f"   当前面板 URL: {sb.get_current_url()}")
 
-    # 免费服过期后可能进入 Activate Your Server，需先选 COAL Free
+    clicked = False
+    try:
+        clicked = sb.execute_script("""
+            var id = arguments[0];
+            var cards = document.querySelectorAll('a[href], button, [role="button"], div');
+            for (var i = 0; i < cards.length; i++) {
+                var c = cards[i];
+                var href = c.getAttribute('href') || '';
+                var text = (c.innerText || '').replace(/\\s+/g, ' ').trim();
+                if (href.indexOf('/server/' + id) >= 0 || href.indexOf('/servers/' + id) >= 0) {
+                    c.click(); return true;
+                }
+                if (text.indexOf(id) >= 0 && c.offsetParent !== null) {
+                    var link = c.closest('a') || c.querySelector('a');
+                    if (link) { link.click(); return true; }
+                    c.click(); return true;
+                }
+            }
+            return false;
+        """, sid)
+    except Exception as e:
+        print(f"   点击服务器卡片异常: {e}")
+    if clicked:
+        print(f"   已点击服务器卡片 {sid}")
+        time.sleep(4)
+        handle_cloudflare(sb)
+        wait_challenge_gone(sb, timeout=15)
+        time.sleep(2)
+    else:
+        print(f"   未在列表页找到卡片，尝试直接打开 URL...")
+        try:
+            sb.uc_open_with_reconnect(server_url, reconnect_time=5)
+        except Exception:
+            sb.open(server_url)
+        sb.wait_for_ready_state_complete()
+        time.sleep(4)
+        handle_cloudflare(sb)
+        wait_challenge_gone(sb, timeout=15)
+        time.sleep(2)
+
+    print(f"   当前面板 URL: {sb.get_current_url()}")
     ok = ensure_not_on_activate_page(sb)
     if not ok:
         print("⚠️ COAL 激活失败，后续可能无法续期")
-    # 再处理一次可能弹出的验证，并刷新状态
     handle_cloudflare(sb)
     wait_challenge_gone(sb, timeout=12)
     time.sleep(1)
