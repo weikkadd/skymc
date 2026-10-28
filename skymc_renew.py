@@ -1055,8 +1055,8 @@ def open_server_panel(sb, server_url):
     except Exception:
         pass
 
+    # 策略1：精确匹配 a[href] 包含 /server/<id>
     clicked = False
-    # 策略1：精确匹配 a[href] 包含 /server/<id> 或 /servers/<id>
     try:
         clicked = sb.execute_script("""
             var id = arguments[0];
@@ -1074,33 +1074,135 @@ def open_server_panel(sb, server_url):
         print(f"   策略1（a[href]精确匹配）异常: {e}")
     if clicked:
         print(f"   ✅ 策略1命中：a[href] 精确匹配 {sid}")
+        time.sleep(4)
+        handle_cloudflare(sb)
+        wait_challenge_gone(sb, timeout=15)
+        time.sleep(2)
 
-    # 策略2：data-* 属性或 onclick 包含 ID
-    if not clicked:
+    # 策略2：Selenium ActionChains 点击卡片（触发 SvelteKit 路由）
+    current_url = sb.get_current_url()
+    if not clicked or (sid not in current_url and '/server/' not in current_url):
+        print(f"   策略2：Selenium ActionChains 点击卡片...")
         try:
-            clicked = sb.execute_script("""
+            from selenium.webdriver.common.action_chains import ActionChains
+            from selenium.webdriver.common.by import By
+
+            elements = sb.driver.find_elements(
+                By.XPATH, f"//*[contains(., '{sid}')]"
+            )
+            target = None
+            best_len = 999999
+            for el in elements:
+                try:
+                    if not el.is_displayed():
+                        continue
+                    text = el.text.strip()
+                    if sid not in text or len(text) > 300:
+                        continue
+                    size = el.size
+                    if size.get("width", 0) < 100 or size.get("height", 0) < 50:
+                        continue
+                    if len(text) < best_len:
+                        best_len = len(text)
+                        target = el
+                except Exception:
+                    continue
+
+            if target:
+                print(f"   找到卡片元素: text={target.text[:60]}... size={target.size}")
+                sb.driver.execute_script(
+                    "arguments[0].scrollIntoView({block:'center', inline:'center'});", target
+                )
+                time.sleep(1)
+                actions = ActionChains(sb.driver)
+                actions.move_to_element(target).pause(0.5).click(target).perform()
+                print(f"   ActionChains 已点击卡片")
+                time.sleep(4)
+                handle_cloudflare(sb)
+                wait_challenge_gone(sb, timeout=15)
+                current_url = sb.get_current_url()
+                print(f"   ActionChains 后 URL: {current_url}")
+                if sid in current_url or '/server/' in current_url:
+                    clicked = True
+                    print(f"   ✅ 策略2命中：ActionChains 成功导航")
+            else:
+                print(f"   未找到包含 {sid} 的可见卡片元素")
+        except Exception as e:
+            print(f"   策略2（ActionChains）异常: {e}")
+
+    # 策略3：CDP 坐标点击（最接近真实鼠标）
+    current_url = sb.get_current_url()
+    if not clicked or (sid not in current_url and '/server/' not in current_url):
+        print(f"   策略3：CDP 坐标点击卡片...")
+        try:
+            coord_json = sb.execute_script("""
                 var id = arguments[0];
-                var els = document.querySelectorAll('[onclick], [role="button"], button');
-                for (var i = 0; i < els.length; i++) {
-                    var el = els[i];
-                    var html = el.outerHTML.slice(0, 500);
-                    if (html.indexOf(id) >= 0 && el.offsetParent !== null) {
-                        el.click(); return true;
+                var cards = document.querySelectorAll('div, section, article, li, button, a');
+                var best = null;
+                for (var i = 0; i < cards.length; i++) {
+                    var c = cards[i];
+                    var text = (c.innerText || '').replace(/\\s+/g, ' ').trim();
+                    if (text.indexOf(id) >= 0 && text.length < 300 && c.offsetParent !== null) {
+                        var r = c.getBoundingClientRect();
+                        if (r.width > 100 && r.height > 50) {
+                            if (!best || text.length < best.textLen) {
+                                best = {x: r.left + r.width/2, y: r.top + r.height/2, w: r.width, h: r.height, textLen: text.length, text: text.slice(0, 80)};
+                            }
+                        }
                     }
                 }
-                return false;
+                return best ? JSON.stringify(best) : null;
             """, sid)
+            if coord_json:
+                coord = json.loads(coord_json)
+                print(f"   卡片坐标: ({coord['x']:.0f}, {coord['y']:.0f}) 尺寸: {coord['w']:.0f}x{coord['h']:.0f}")
+                # 先滚动到可见
+                sb.execute_script(f"window.scrollTo({{top: {coord['y'] - 400}, behavior: 'smooth'}});")
+                time.sleep(1)
+                # 重新获取坐标
+                coord_json = sb.execute_script("""
+                    var id = arguments[0];
+                    var cards = document.querySelectorAll('div, section, article, li, button, a');
+                    var best = null;
+                    for (var i = 0; i < cards.length; i++) {
+                        var c = cards[i];
+                        var text = (c.innerText || '').replace(/\\s+/g, ' ').trim();
+                        if (text.indexOf(id) >= 0 && text.length < 300 && c.offsetParent !== null) {
+                            var r = c.getBoundingClientRect();
+                            if (r.width > 100 && r.height > 50) {
+                                if (!best || text.length < best.textLen) {
+                                    best = {x: r.left + r.width/2, y: r.top + r.height/2, w: r.width, h: r.height, textLen: text.length};
+                                }
+                            }
+                        }
+                    }
+                    return best ? JSON.stringify(best) : null;
+                """, sid)
+                if coord_json:
+                    coord = json.loads(coord_json)
+                    print(f"   滚动后卡片坐标: ({coord['x']:.0f}, {coord['y']:.0f})")
+                    _cdp_click_xy(sb, float(coord['x']), float(coord['y']))
+                    time.sleep(4)
+                    handle_cloudflare(sb)
+                    wait_challenge_gone(sb, timeout=15)
+                    current_url = sb.get_current_url()
+                    print(f"   CDP 点击后 URL: {current_url}")
+                    if sid in current_url or '/server/' in current_url:
+                        clicked = True
+                        print(f"   ✅ 策略3命中：CDP 坐标点击成功导航")
+            else:
+                print(f"   未找到卡片坐标")
         except Exception as e:
-            print(f"   策略2（data/onclick匹配）异常: {e}")
-        if clicked:
-            print(f"   ✅ 策略2命中：onclick/data 属性包含 {sid}")
+            print(f"   策略3（CDP点击）异常: {e}")
 
-    # 策略3：包含 ID 文本的可见卡片，点击卡片本身
-    if not clicked:
+    # 策略4：JS 完整指针事件
+    current_url = sb.get_current_url()
+    if not clicked or (sid not in current_url and '/server/' not in current_url):
+        print(f"   策略4：JS 完整指针事件...")
         try:
-            clicked = sb.execute_script("""
+            sb.execute_script("""
                 var id = arguments[0];
-                var cards = document.querySelectorAll('div, section, article, li');
+                var cards = document.querySelectorAll('div, section, article, li, button, a');
                 var best = null;
                 for (var i = 0; i < cards.length; i++) {
                     var c = cards[i];
@@ -1115,32 +1217,39 @@ def open_server_panel(sb, server_url):
                     }
                 }
                 if (best) {
-                    var link = best.el.querySelector('a[href*="/server/"]') || best.el.querySelector('a[href*="/servers/"]');
-                    if (link) { link.click(); return true; }
-                    best.el.click(); return true;
+                    best.el.scrollIntoView({block:'center'});
+                    var r = best.el.getBoundingClientRect();
+                    var x = r.left + r.width/2, y = r.top + r.height/2;
+                    var opts = {bubbles:true, cancelable:true, view:window, clientX:x, clientY:y, button:0, pointerId:1, pointerType:'mouse'};
+                    ['pointerover','pointerenter','mouseover','mouseenter','pointermove','pointerdown','mousedown','focus','pointerup','mouseup','click'].forEach(function(type) {
+                        try {
+                            var Ev = type.indexOf('pointer') === 0 ? PointerEvent : MouseEvent;
+                            best.el.dispatchEvent(new Ev(type, opts));
+                        } catch (e) {
+                            try { best.el.dispatchEvent(new MouseEvent(type, opts)); } catch (e2) {}
+                        }
+                    });
+                    return true;
                 }
                 return false;
             """, sid)
+            time.sleep(4)
+            handle_cloudflare(sb)
+            wait_challenge_gone(sb, timeout=15)
+            current_url = sb.get_current_url()
+            print(f"   JS 指针事件后 URL: {current_url}")
+            if sid in current_url or '/server/' in current_url:
+                clicked = True
+                print(f"   ✅ 策略4命中：JS 指针事件成功导航")
         except Exception as e:
-            print(f"   策略3（卡片文本匹配）异常: {e}")
-        if clicked:
-            print(f"   ✅ 策略3命中：卡片文本包含 {sid}")
+            print(f"   策略4（JS指针事件）异常: {e}")
 
-    if clicked:
-        print(f"   已点击服务器卡片 {sid}")
-        time.sleep(4)
-        handle_cloudflare(sb)
-        wait_challenge_gone(sb, timeout=15)
-        time.sleep(2)
-    else:
-        print(f"   ❌ 列表页未找到卡片，尝试直接打开 URL...")
-
-    # URL 验证：如果点击后 URL 不含 server ID，尝试直接导航
+    # URL 验证：如果仍未进入面板，尝试直接导航
     current_url = sb.get_current_url()
     print(f"   当前面板 URL: {current_url}")
 
-    if sid not in current_url and '/server' not in current_url:
-        print(f"   ⚠️ URL 未包含服务器 ID，尝试直接导航...")
+    if sid not in current_url and '/server/' not in current_url:
+        print(f"   ⚠️ 仍在列表页，尝试直接导航...")
         nav_urls = [
             server_url,
             f"https://skymc.org/en/servers/{sid}",
@@ -1161,10 +1270,9 @@ def open_server_panel(sb, server_url):
             wait_challenge_gone(sb, timeout=10)
             current_url = sb.get_current_url()
             print(f"   导航后 URL: {current_url}")
-            if sid in current_url or '/server' in current_url:
+            if sid in current_url or '/server/' in current_url:
                 print(f"   ✅ 导航成功")
                 break
-            # 检查页面是否有 500 错误
             try:
                 body_head = sb.execute_script("return (document.body&&document.body.innerText)?document.body.innerText.slice(0,200):'';")
                 if '500' in body_head or 'Internal Server Error' in body_head:
